@@ -1,6 +1,5 @@
 # **Project Introduction**
-This is the official implementation of the following paper:
-**FedPall: Prototype-based Adversarial and Collaborative Learning for Federated Learning with Feature Drift** 
+Official repo of **FedPall: Prototype-based Adversarial and Collaborative Learning for Federated Learning with Feature Drift** , ICCV 2025.
 ***
 In this paper, we propose the **FedPall** algorithm, which addresses the **feature drift** problem by using prototype-based adversarial collaborative learning.
 ***
@@ -102,4 +101,16 @@ Please use the following command to test our algorithm,
 cd exps
 # test experiment in [digit | office | PACS] dataset
 python test.py --dataset digit --batch 64
+```
+## BibTeX
+If you find AdvEncoder both interesting and helpful, please consider citing us in your research or publications:
+```
+@InProceedings{Zhang_2025_ICCV,
+    author    = {Zhang, Yong and Liang, Feng and Yuan, Guanghu and Yang, Min and Li, Chengming and Hu, Xiping},
+    title     = {FedPall: Prototype-based Adversarial and Collaborative Learning for Federated Learning with Feature Drift},
+    booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},
+    month     = {October},
+    year      = {2025},
+    pages     = {1-10}
+}
 ```
