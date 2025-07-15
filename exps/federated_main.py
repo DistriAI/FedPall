@@ -23,6 +23,148 @@ from PIL import Image
 import concurrent.futures
 import pickle
 
+def generate_random_tensor(size, p):
+    assert 0 <= p <= 1, "p should be between 0 and 1"
+    num_ones = int(size * p)
+    tensor = torch.cat((torch.ones(num_ones), torch.zeros(size - num_ones)))
+    tensor = tensor[torch.randperm(tensor.size(0))]
+    return tensor.view(size)
+
+def calculate_q(args, L, diff_dict_flatten, round, client_weights):
+    M, G = args.num_users, diff_dict_flatten.shape[1]
+    t = round
+    indicator = (diff_dict_flatten >= 0).float()
+    L = (L * (t - 1) + indicator) / t
+
+    C = torch.where(diff_dict_flatten >= 0, L, 1 - L)  # c_{m,i} shape: (M, G)
+
+    mask = (C >= args.tau).float()  # I(c_{m,i} >= τ)
+    masked_diffs = mask * diff_dict_flatten
+    d_m = (masked_diffs ** 2).sum(dim=1)  # d_m: (M,)
+
+    if round == 1:
+        args.p_t = torch.tensor(client_weights).to(args.device)
+        args.delta_p_t = torch.zeros(M).to(args.device)
+
+    d_sum = d_m.sum()
+    delta_p_t = (1 - args.beta) * args.delta_p_t + args.beta * (d_m / d_sum)
+    p_t = args.p_t + delta_p_t
+    p_t = p_t / p_t.sum()
+
+    args.p_t = p_t.detach()
+    args.delta_p_t = delta_p_t.detach()
+
+    p_t_expanded = p_t.view(M, 1)
+    numerator = mask * p_t_expanded
+    denominator = numerator.sum(dim=0, keepdim=True) 
+    denominator_safe = denominator + (denominator == 0).float()
+    # q_t: shape (M, G)
+    q_t = numerator / denominator_safe
+
+    return q_t, L
+
+def compute_num_list(args, train_loader_list):
+    num_list = [Counter() for idx in range(args.num_users)]
+    for idx in range(args.num_users):
+        train_set = iter(train_loader_list[idx])
+        for batch_idx in range(len(train_set)):
+            images, labels = next(train_set)
+            images, labels = images.to(args.device).float(), labels.to(args.device).long()
+            for label in labels:
+                if label.item() not in num_list[idx]:
+                    num_list[idx][label.item()] = 1
+                else:
+                    num_list[idx][label.item()]+=1
+    return num_list
+
+def model_fusion(list_dicts_local_params: list, list_nums_local_data: list):
+    # fedavg
+    local_params = copy.deepcopy(list_dicts_local_params[0])
+    for name_param in list_dicts_local_params[0]:
+        list_values_param = []
+        for dict_local_params, num_local_data in zip(list_dicts_local_params, list_nums_local_data):
+            list_values_param.append(dict_local_params[name_param] * num_local_data)
+        value_global_param = sum(list_values_param) / sum(list_nums_local_data)
+        local_params[name_param] = value_global_param
+    return local_params
+
+def communication(args, server_model, models, client_weights):
+    with torch.no_grad():
+        # aggregate params
+        if args.mode.lower() == 'fedbn':
+            for key in server_model.state_dict().keys():
+                if 'bn' not in key:
+                    temp = torch.zeros_like(server_model.state_dict()[key], dtype=torch.float32)
+                    for client_idx in range(args.num_users):
+                        temp += client_weights[client_idx] * models[client_idx].state_dict()[key]
+                    server_model.state_dict()[key].data.copy_(temp)
+                    for client_idx in range(args.num_users):
+                        models[client_idx].state_dict()[key].data.copy_(server_model.state_dict()[key])
+        elif args.mode.lower() == 'fedrep':
+            for key in server_model.features.state_dict().keys():
+                temp = torch.zeros_like(server_model.features.state_dict()[key], dtype=torch.float32)
+                for client_idx in range(args.num_users):
+                    temp += client_weights[client_idx] * models[client_idx].features.state_dict()[key]
+                server_model.features.state_dict()[key].data.copy_(temp)
+                for client_idx in range(args.num_users):
+                    models[client_idx].features.state_dict()[key].data.copy_(server_model.features.state_dict()[key])
+        else:
+            for key in server_model.state_dict().keys():
+                # num_batches_tracked is a non trainable LongTensor and
+                # num_batches_tracked are the same for all clients for the given datasets
+                if 'num_batches_tracked' in key:
+                    server_model.state_dict()[key].data.copy_(models[0].state_dict()[key])
+                else:
+                    temp = torch.zeros_like(server_model.state_dict()[key])
+                    for client_idx in range(len(client_weights)):
+                        temp += client_weights[client_idx] * models[client_idx].state_dict()[key]
+                    server_model.state_dict()[key].data.copy_(temp)
+                    for client_idx in range(len(client_weights)):
+                        models[client_idx].state_dict()[key].data.copy_(server_model.state_dict()[key])
+    return copy.deepcopy(server_model), copy.deepcopy(models)
+
+def communication_heal(args, server_model, diff_dict, q):
+    M, G = diff_dict.shape
+    weighted_update_flat = (q * diff_dict).sum(dim=0)  # shape (G,)
+    idx = 0
+    with torch.no_grad():
+        for param in server_model.parameters():
+            if param.requires_grad:
+                num_param = param.numel()
+                update_chunk = weighted_update_flat[idx:idx + num_param].view_as(param).to(args.device)
+                param.add_(update_chunk)
+                idx += num_param
+
+    return copy.deepcopy(server_model)
+
+def get_cls_ratio(args, num_list):
+    total_count = sum(num_list.values())
+    proportion_list = {key:num / total_count for key, num in num_list.items()}
+    return proportion_list
+
+def cal_norm_mean(args, c_means, c_dis):
+    glo_means = dict()
+    c_dis_temp = torch.ones((args.num_users, args.num_classes))
+    for idx in range(args.num_users):
+        for key, value in c_dis[idx].items():
+            c_dis_temp[idx][key] = value
+    c_dis = c_dis_temp.to(args.device)
+    total_num_per_cls = c_dis.sum(dim=0)
+    for i in range(args.num_classes):
+        for c_idx, c_mean in enumerate(c_means):
+            if i not in c_mean.keys():
+                continue
+            temp = glo_means.get(i, 0)
+            # normalize the local prototypes, send the direction to the server
+            glo_means[i] = temp + \
+                F.normalize(c_mean[i].view(1, -1),
+                            dim=1).view(-1) * c_dis[c_idx][i]
+        if glo_means.get(i) == None:
+            continue
+        t = glo_means[i]
+        glo_means[i] = t / total_num_per_cls[i]
+    return glo_means
+
 def SingleSet(args, train_loader_list, test_loader_list):
     loader_size = [len(train_loader.dataset) for train_loader in train_loader_list]
     client_weights = [item / sum(loader_size) for item in loader_size]
@@ -491,7 +633,65 @@ def RUCR(args, train_loader_list, test_loader_list):
             for idx2 in range(len(datasets_name)):
                 local_models[idx1 * len(datasets_name) + idx2] = copy.deepcopy(global_model)
     return train_loss, accuracy_list, datasets_name
- 
+
+def FedHEAL(args, train_loader_list, test_loader_list):
+    loader_size = [len(train_loader.dataset) for train_loader in train_loader_list]
+    client_weights = [item / sum(loader_size) for item in loader_size]
+    if args.dataset == "digit":
+        global_model = adcol_model().to(args.device)
+        local_models = [copy.deepcopy(global_model).to(args.device) for idx in range(args.num_users)]
+        datasets_name = ["MNIST", "SVHN", "USPS", "SynthDigits", "MNIST-M"]
+    elif args.dataset == "office":
+        global_model = adcol_model(num_classes=args.num_classes).to(args.device)
+        local_models = [copy.deepcopy(global_model).to(args.device) for idx in range(args.num_users)]
+        datasets_name = ["amazon", "caltech", "dslr", "webcam"]
+    elif args.dataset == "PACS":
+        global_model = adcol_model(num_classes=args.num_classes).to(args.device)
+        local_models = [copy.deepcopy(global_model).to(args.device) for idx in range(args.num_users)]
+        datasets_name = ["art_painting", "cartoon", "photo", "sketch"]
+    train_loss = {item: [] for item in datasets_name}
+    accuracy_list = {item: [] for item in datasets_name}
+    L = torch.stack([torch.zeros(sum(p.numel() for p in global_model.parameters() if p.requires_grad)) for i in range(args.num_users)], dim = 0).to(args.device)
+    for round in tqdm(range(args.iters)):
+        diff_dict = []
+        print(f'\n | Global Training Round : {round} |\n')
+        # select clients
+        for idx1 in range(args.num_users // len(datasets_name)):
+            for idx2 in range(len(datasets_name)):
+                local_node = LocalUpdate(args=args)
+                local_models[idx1 * len(datasets_name) + idx2] = local_node.update_weights(model=copy.deepcopy(global_model), train_loader=train_loader_list[idx1 * len(datasets_name) + idx2])
+                # return difference of localmode and global model
+                diff_dict_m = {}
+                for (name_a, param_a), (name_b, param_b) in zip(local_models[idx1 * len(datasets_name) + idx2].named_parameters(), global_model.named_parameters()):
+                    assert name_a == name_b
+                    diff_dict_m[name_a] = param_a.data - param_b.data 
+                diff_dict.append(diff_dict_m)
+        diff_dict_flatten = torch.stack([torch.cat([p.view(-1) for p in diff_dict_m.values()], dim=0) for diff_dict_m in diff_dict], dim=0)
+        if round > 0:
+            q, L = calculate_q(args, L, diff_dict_flatten, round, client_weights)
+        else:
+            q = torch.tensor(client_weights).unsqueeze(dim=1).to(args.device) * torch.ones_like(diff_dict_flatten)
+        # update global model
+        if round != 0:
+            global_model = communication_heal(args, copy.deepcopy(global_model), copy.deepcopy(diff_dict_flatten), q)
+        else:
+            global_model, _ = communication(args, copy.deepcopy(global_model), copy.deepcopy(local_models), client_weights)
+        loss_temp = [0 for i in range(len(datasets_name))]
+        acc_temp = [0 for i in range(len(datasets_name))]
+        for idx1 in range(args.num_users // len(datasets_name)):
+            with torch.no_grad():
+                for idx2 in range(len(datasets_name)):
+                    local_test = LocalTest(args=args)
+                    loss, _ = local_test.test_inference(args, copy.deepcopy(local_models[idx2]), train_loader_list[idx1 * len(datasets_name) + idx2])
+                    loss_temp[idx2] += loss
+                    _, acc = local_test.test_inference(args, copy.deepcopy(local_models[idx2]), test_loader_list[idx2])
+                    acc_temp[idx2] += acc
+        for idx in range(len(datasets_name)):
+            print('{:<11s} | train loss: {:.4f} | Test Acc: {:.4f}'.format(datasets_name[idx], loss_temp[idx] / (args.num_users // len(datasets_name)), acc_temp[idx] / (args.num_users // len(datasets_name))))
+            train_loss[datasets_name[idx]].append(copy.deepcopy(loss_temp[idx] / (args.num_users // len(datasets_name))))
+            accuracy_list[datasets_name[idx]].append(copy.deepcopy(acc_temp[idx] / (args.num_users // len(datasets_name))))
+    return train_loss, accuracy_list, datasets_name
+
 def ours(args, train_loader_list, test_loader_list):
     loader_size = [len(train_loader.dataset) for train_loader in train_loader_list]
     client_weights = [item / sum(loader_size) for item in loader_size]
