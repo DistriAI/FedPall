@@ -1042,7 +1042,7 @@ def fed_main(args):
     torch.cuda.set_device(args.device)
     if args.exp == 1:
         # main experiment
-        # modes = ["SingleSet", "fedavg", "fedprox", "perfedavg", "fedrep", "fedproto", "fedBN", "moon", "adcol", "RUCR", "ours"]
+        # modes = ["SingleSet", "fedavg", "fedprox", "perfedavg", "fedrep", "fedproto", "fedBN", "moon", "adcol", "fed_heal", "RUCR", "ours"]
         seeds = [0,1,2]
         args.save_path = f"../result/exp{args.exp}/{args.dataset}/resnet50/"
         os.makedirs(args.save_path, exist_ok=True)
@@ -1105,6 +1105,19 @@ def fed_main(args):
                 train_loss, accuracy_list, datasets_name = perfedavg(args, train_loader_list, test_loader_list)
             elif args.mode == "moon":
                 train_loss, accuracy_list, datasets_name = moon(args, train_loader_list, test_loader_list)
+            elif args.mode == "fed_heal":
+                    # We have configured the optimal parameters according to the original paper alignment
+                    args.lr = 1e-3
+                    if args.dataset == "digit":
+                        args.beta = 0.4
+                        args.tau = 0.3
+                    elif args.dataset == "office":
+                        args.beta = 0.4
+                        args.tau = 0.4
+                    elif args.dataset == "PACS":
+                        args.beta = 0.4
+                        args.tau = 0.4
+                    train_loss, accuracy_list, datasets_name = FedHEAL(args, train_loader_list, test_loader_list)
             elif args.mode == "adcol":
                 train_loss, accuracy_list, datasets_name = adcol(args, train_loader_list, test_loader_list)
             elif args.mode == "ours":
