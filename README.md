@@ -46,7 +46,7 @@ python data_pre.py
 ## Usage
 ### Train
 Please using following commands to train a model with federated learning strategy.
-- **--mode** specify federated learning strategy, option: SingleSet | fedavg | fedprox | perfedavg | fedBN | fedrep | moon | fedproto | adcol | RUCR | ours
+- **--mode** specify federated learning strategy, option: SingleSet | fedavg | fedprox | perfedavg | fedBN | fedrep | moon | fedproto | adcol | RUCR | fedheal | ours
 - **--dataset** specify datasets, option: digit | office | PACS
 - **--exp** experiment No.
 - **--iters** iterations for communication
@@ -54,20 +54,16 @@ Please using following commands to train a model with federated learning strateg
 - Of course, you can statically set other parameters through the parameter configuration file `./exps/option.py`
 ```bash
 cd exps
-# benchmark experiment in Digits dataset
-python federated_main.py --mode ours --dataset digit --exp 1 --iters 100 --batch 64
-# benchmark experiment in Office-10 dataset
-python federated_main.py --mode ours --dataset office --exp 1 --iters 100 --batch 32
-# benchmark experiment in PACS dataset
-python federated_main.py --mode ours --dataset PACS --exp 1 --iters 100 --batch 32
+# benchmark experiment in [digit | office | PACS] dataset
+python federated_main.py --exp 1
 ```
 You can run our ablation experiments by following the command.
 ```bash
 cd exps
 # ablation1 experiment in [digit | office | PACS] dataset : effect of loss combination
-python federated_main.py --dataset digit --exp 2 --iters 100 --batch 64
+python federated_main.py --exp 2
 # ablation2 experiment in [digit | office | PACS] dataset : whether to replace the local classifier
-python federated_main.py --dataset digit --exp 3 --iters 100 --batch 64
+python federated_main.py --exp 3
 ```
 
 ### Test
@@ -100,7 +96,7 @@ Please use the following command to test our algorithm,
 ```bash
 cd exps
 # test experiment in [digit | office | PACS] dataset
-python test.py --dataset digit --batch 64
+python test.py --dataset digit
 ```
 ## BibTeX
 If you find AdvEncoder both interesting and helpful, please consider citing us in your research or publications:
